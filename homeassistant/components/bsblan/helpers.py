@@ -1,6 +1,6 @@
 """Helper functions for BSB-Lan integration."""
 
-from bsblan import BSBLAN, BSBLANError, EntityInfo, StaticState
+from bsblan import BSBLAN, BSBLANError, EntityInfo
 
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.util import dt as dt_util
@@ -14,23 +14,6 @@ def first_temperature(*sources: EntityInfo[float] | None) -> float | None:
         if source is not None and source.value is not None:
             return source.value
     return None
-
-
-def circuit_temperature_bounds(
-    static: StaticState | None,
-) -> tuple[float | None, float | None]:
-    """Return the minimum and maximum setpoint of a heating circuit.
-
-    Standard BSB/LPB circuits expose the bounds via heating_protective_setpoint
-    (714) and comfort_setpoint_max (716); min_temp/max_temp (15006/15007) exist
-    only on PPS devices. Inactive parameters ("---") have value None.
-    """
-    if static is None:
-        return None, None
-    return (
-        first_temperature(static.heating_protective_setpoint, static.min_temp),
-        first_temperature(static.comfort_setpoint_max, static.max_temp),
-    )
 
 
 def validate_setpoint_order(
