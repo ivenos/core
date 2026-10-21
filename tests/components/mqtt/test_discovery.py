@@ -4519,3 +4519,66 @@ async def test_async_removed_from_device(
     """
     event = Event(dr.EVENT_DEVICE_REGISTRY_UPDATED, event_data)
     assert async_removed_from_device(event) is expected
+
+
+DEVICE_WITH_VIA_DEVICE = {"identifiers": ["no_unique_id"], "via_device": "hub"}
+ATTACH_DEVICE_WARNING = "attempts to attach a device to an entity without a unique ID"
+
+
+async def test_discovery_without_unique_id_ignores_device(
+    hass: HomeAssistant,
+    mqtt_mock_entry: MqttMockHAClientGenerator,
+    device_registry: dr.DeviceRegistry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the device config of a discovered entity without unique ID is ignored."""
+    await mqtt_mock_entry()
+    config = {
+        "name": "Test",
+        "command_topic": "test/set",
+        "device": DEVICE_WITH_VIA_DEVICE,
+    }
+    async_fire_mqtt_message(hass, "homeassistant/switch/bla/config", json.dumps(config))
+    await hass.async_block_till_done()
+    assert hass.states.get("switch.test") is not None
+
+    # A discovery update ignores the device config too
+    async_fire_mqtt_message(
+        hass,
+        "homeassistant/switch/bla/config",
+        json.dumps({**config, "name": "Updated"}),
+    )
+    await hass.async_block_till_done()
+    assert not dr.async_entries_for_config_entry(
+        device_registry, hass.config_entries.async_entries(mqtt.DOMAIN)[0].entry_id
+    )
+    assert ATTACH_DEVICE_WARNING not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "hass_config",
+    [
+        {
+            mqtt.DOMAIN: {
+                "switch": {
+                    "name": "Test",
+                    "command_topic": "test/set",
+                    "device": DEVICE_WITH_VIA_DEVICE,
+                }
+            }
+        }
+    ],
+)
+async def test_yaml_without_unique_id_ignores_device(
+    hass: HomeAssistant,
+    mqtt_mock_entry: MqttMockHAClientGenerator,
+    device_registry: dr.DeviceRegistry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the device config of a YAML entity without unique ID is ignored."""
+    await mqtt_mock_entry()
+    assert hass.states.get("switch.test") is not None
+    assert not dr.async_entries_for_config_entry(
+        device_registry, hass.config_entries.async_entries(mqtt.DOMAIN)[0].entry_id
+    )
+    assert ATTACH_DEVICE_WARNING not in caplog.text
