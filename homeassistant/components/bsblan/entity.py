@@ -1,26 +1,15 @@
 """BSBLan base entity."""
 
-from typing import Any, override
-
-from bsblan import (
-    BSBLANError,
-    HotWaterConfig,
-    HotWaterState,
-    SetHotWaterParam,
-    State,
-    StaticState,
-)
+from typing import override
 
 from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import BSBLanData, get_bsblan_device_info
-from .const import DEFAULT_HOT_WATER_MAX_TEMP, DEFAULT_PORT, DOMAIN
+from .const import DEFAULT_PORT, DOMAIN
 from .coordinator import BSBLanCoordinator, BSBLanFastCoordinator, BSBLanSlowCoordinator
-from .helpers import first_temperature, validate_setpoint_order
 
 
 class BSBLanEntityBase[_T: BSBLanCoordinator](CoordinatorEntity[_T]):
@@ -81,7 +70,6 @@ class BSBLanCircuitEntity(BSBLanDualCoordinatorEntity):
     ) -> None:
         """Initialize BSBLan circuit entity with sub-device info."""
         super().__init__(fast_coordinator, slow_coordinator, data)
-        self._circuit = circuit
         mac = data.device.MAC
         host = fast_coordinator.config_entry.data[CONF_HOST]
         port = fast_coordinator.config_entry.data.get(CONF_PORT, DEFAULT_PORT)
@@ -99,69 +87,6 @@ class BSBLanCircuitEntity(BSBLanDualCoordinatorEntity):
             model=main_info.model,
             model_id=main_info.model_id,
         )
-
-    @property
-    def _circuit_state(self) -> State:
-        """Return the state for this circuit."""
-        return self.coordinator.data.states[self._circuit]
-
-    @property
-    def _circuit_config(self) -> StaticState | None:
-        """Return the slow-polled config for this circuit."""
-        return (
-            self.slow_coordinator.data.heating_config.get(self._circuit)
-            if self.slow_coordinator.data
-            else None
-        )
-
-    @property
-    def _comfort_setpoint(self) -> float | None:
-        """Return the comfort setpoint."""
-        return first_temperature(self._circuit_state.target_temperature)
-
-    @property
-    def _reduced_setpoint(self) -> float | None:
-        """Return the reduced setpoint."""
-        if (config := self._circuit_config) is None:
-            return None
-        return first_temperature(config.temp_reduced_setpoint)
-
-    def _validate_setpoint(self, temperature: float, *, reduced: bool) -> None:
-        """Keep the reduced setpoint at or below the comfort setpoint."""
-        if reduced:
-            validate_setpoint_order(
-                temperature, "reduced_above_comfort", maximum=self._comfort_setpoint
-            )
-        else:
-            validate_setpoint_order(
-                temperature, "comfort_below_reduced", minimum=self._reduced_setpoint
-            )
-
-    async def _async_set_setpoint(self, temperature: float, *, reduced: bool) -> None:
-        """Write the comfort or reduced setpoint."""
-        if reduced:
-            await self._async_thermostat(
-                temp_reduced_setpoint=temperature, refresh_config=True
-            )
-        else:
-            await self._async_thermostat(target_temperature=temperature)
-
-    async def _async_thermostat(
-        self, *, refresh_config: bool = False, **kwargs: Any
-    ) -> None:
-        """Write a thermostat parameter, then refresh the state."""
-        try:
-            await self.coordinator.client.thermostat(**kwargs, circuit=self._circuit)
-        except BSBLANError as err:
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="set_data_error",
-            ) from err
-        # The config holds the reduced setpoint, refresh it before the state
-        # so the comfort level in effect is derived from up-to-date values
-        if refresh_config:
-            await self.slow_coordinator.async_request_refresh()
-        await self.coordinator.async_request_refresh()
 
 
 class BSBLanWaterHeaterDeviceEntity(BSBLanDualCoordinatorEntity):
@@ -191,90 +116,3 @@ class BSBLanWaterHeaterDeviceEntity(BSBLanDualCoordinatorEntity):
             model=main_info.model,
             model_id=main_info.model_id,
         )
-
-    @property
-    def _dhw(self) -> HotWaterState:
-        """Return DHW state data.
-
-        Water heater entities are only created when DHW data is available.
-        """
-        dhw = self.coordinator.data.dhw
-        assert dhw is not None
-        return dhw
-
-    @property
-    def _dhw_config(self) -> HotWaterConfig | None:
-        """Return the slow-coordinator DHW config.
-
-        It may still be pending when the platform is set up.
-        """
-        return (
-            self.slow_coordinator.data.dhw_config
-            if self.slow_coordinator.data
-            else None
-        )
-
-    @property
-    def _setpoint_max(self) -> float:
-        """Return the highest DHW setpoint, or the default until it is fetched."""
-        if (dhw_config := self._dhw_config) is not None and (
-            maximum := first_temperature(dhw_config.nominal_setpoint_max)
-        ) is not None:
-            return maximum
-        return DEFAULT_HOT_WATER_MAX_TEMP
-
-    @property
-    def _nominal_setpoint(self) -> float | None:
-        """Return the nominal DHW setpoint."""
-        return first_temperature(self._dhw.nominal_setpoint)
-
-    @property
-    def _reduced_setpoint(self) -> float | None:
-        """Return the reduced DHW setpoint."""
-        if (dhw_config := self._dhw_config) is None:
-            return None
-        return first_temperature(dhw_config.reduced_setpoint)
-
-    def _validate_setpoint(self, temperature: float, *, reduced: bool) -> None:
-        """Keep the reduced setpoint at or below the nominal setpoint."""
-        if reduced:
-            validate_setpoint_order(
-                temperature, "reduced_above_nominal", maximum=self._nominal_setpoint
-            )
-        else:
-            validate_setpoint_order(
-                temperature, "nominal_below_reduced", minimum=self._reduced_setpoint
-            )
-
-    async def _async_set_setpoint(self, temperature: float, *, reduced: bool) -> None:
-        """Write the nominal or reduced setpoint."""
-        if reduced:
-            await self._async_set_hot_water(
-                SetHotWaterParam(reduced_setpoint=temperature),
-                "set_temperature_error",
-                refresh_config=True,
-            )
-        else:
-            await self._async_set_hot_water(
-                SetHotWaterParam(nominal_setpoint=temperature),
-                "set_temperature_error",
-            )
-
-    async def _async_set_hot_water(
-        self,
-        params: SetHotWaterParam,
-        error_translation_key: str,
-        *,
-        refresh_config: bool = False,
-    ) -> None:
-        """Write a hot water parameter, then refresh the state."""
-        try:
-            await self.coordinator.client.set_hot_water(params)
-        except BSBLANError as err:
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key=error_translation_key,
-            ) from err
-        if refresh_config:
-            await self.slow_coordinator.async_request_refresh()
-        await self.coordinator.async_request_refresh()
