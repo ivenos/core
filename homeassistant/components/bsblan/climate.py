@@ -2,7 +2,7 @@
 
 from typing import Any, Final, override
 
-from bsblan import BSBLANError, State, StaticState, get_hvac_action_category
+from bsblan import get_hvac_action_category
 
 from homeassistant.components.climate import (
     ATTR_HVAC_MODE,
@@ -15,14 +15,12 @@ from homeassistant.components.climate import (
 )
 from homeassistant.const import ATTR_TEMPERATURE
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import BSBLanConfigEntry, BSBLanData
-from .const import DOMAIN
 from .entity import BSBLanCircuitEntity
-from .helpers import first_temperature, validate_setpoint_order
+from .helpers import circuit_temperature_bounds, first_temperature
 
 PARALLEL_UPDATES = 1
 
@@ -106,7 +104,6 @@ class BSBLANClimate(BSBLanCircuitEntity, ClimateEntity):
     ) -> None:
         """Initialize BSBLAN climate device."""
         super().__init__(data.fast_coordinator, data.slow_coordinator, data, circuit)
-        self._circuit = circuit
         mac = format_mac(data.device.MAC)
 
         # Backward compatible unique ID: circuit 1 keeps old format
@@ -117,52 +114,14 @@ class BSBLANClimate(BSBLanCircuitEntity, ClimateEntity):
             # Legacy format, kept as migrating existing unique IDs is not worth the risk
             self._attr_unique_id = f"{mac}-climate-{circuit}"  # pylint: disable=home-assistant-entity-unique-id-redundant-platform
 
-        # Set temperature range from per-circuit static data. Standard BSB/LPB
-        # circuits expose the bounds via heating_protective_setpoint (714) and
-        # comfort_setpoint_max (716); min_temp/max_temp (15006/15007) exist
-        # only on PPS devices. Inactive parameters ("---") have value None.
-        if (static := data.static.get(circuit)) is not None:
-            if (
-                min_temp := first_temperature(
-                    static.heating_protective_setpoint, static.min_temp
-                )
-            ) is not None:
-                self._attr_min_temp = min_temp
-            if (
-                max_temp := first_temperature(
-                    static.comfort_setpoint_max, static.max_temp
-                )
-            ) is not None:
-                self._attr_max_temp = max_temp
+        min_temp, max_temp = circuit_temperature_bounds(data.static.get(circuit))
+        if min_temp is not None:
+            self._attr_min_temp = min_temp
+        if max_temp is not None:
+            self._attr_max_temp = max_temp
         self._attr_native_temperature_unit = (
             data.fast_coordinator.client.get_temperature_unit
         )
-
-    @property
-    def _circuit_state(self) -> State:
-        """Return the state for this circuit."""
-        return self.coordinator.data.states[self._circuit]
-
-    @property
-    def _circuit_config(self) -> StaticState | None:
-        """Return the slow-polled config for this circuit."""
-        return (
-            self.slow_coordinator.data.heating_config.get(self._circuit)
-            if self.slow_coordinator.data
-            else None
-        )
-
-    @property
-    def _comfort_setpoint(self) -> float | None:
-        """Return the comfort setpoint."""
-        return first_temperature(self._circuit_state.target_temperature)
-
-    @property
-    def _reduced_setpoint(self) -> float | None:
-        """Return the reduced setpoint."""
-        if (config := self._circuit_config) is None:
-            return None
-        return first_temperature(config.temp_reduced_setpoint)
 
     @property
     @override
@@ -250,40 +209,3 @@ class BSBLANClimate(BSBLanCircuitEntity, ClimateEntity):
         if hvac_mode is not None:
             await self.async_set_hvac_mode(hvac_mode)
         await self._async_set_setpoint(temperature, reduced=reduced)
-
-    def _validate_setpoint(self, temperature: float, *, reduced: bool) -> None:
-        """Keep the reduced setpoint at or below the comfort setpoint."""
-        if reduced:
-            validate_setpoint_order(
-                temperature, "reduced_above_comfort", maximum=self._comfort_setpoint
-            )
-        else:
-            validate_setpoint_order(
-                temperature, "comfort_below_reduced", minimum=self._reduced_setpoint
-            )
-
-    async def _async_set_setpoint(self, temperature: float, *, reduced: bool) -> None:
-        """Write the comfort or reduced setpoint."""
-        if reduced:
-            await self._async_thermostat(
-                temp_reduced_setpoint=temperature, refresh_config=True
-            )
-        else:
-            await self._async_thermostat(target_temperature=temperature)
-
-    async def _async_thermostat(
-        self, *, refresh_config: bool = False, **kwargs: Any
-    ) -> None:
-        """Write a thermostat parameter, then refresh the state."""
-        try:
-            await self.coordinator.client.thermostat(**kwargs, circuit=self._circuit)
-        except BSBLANError as err:
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="set_data_error",
-            ) from err
-        # The config holds the reduced setpoint, refresh it before the state
-        # so the comfort level in effect is derived from up-to-date values
-        if refresh_config:
-            await self.slow_coordinator.async_request_refresh()
-        await self.coordinator.async_request_refresh()
