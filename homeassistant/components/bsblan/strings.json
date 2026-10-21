@@ -93,6 +93,17 @@
         "name": "Sync time"
       }
     },
+    "number": {
+      "comfort_temperature": {
+        "name": "Comfort temperature"
+      },
+      "nominal_temperature": {
+        "name": "Nominal temperature"
+      },
+      "reduced_temperature": {
+        "name": "Reduced temperature"
+      }
+    },
     "sensor": {
       "current_temperature": {
         "name": "Current temperature"
